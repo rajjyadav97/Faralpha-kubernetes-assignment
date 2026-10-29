@@ -2,7 +2,7 @@
 
 A Python Flask API backed by MongoDB authentication, deployed on a local Minikube Kubernetes cluster. The project includes a two-replica Flask Deployment, internal MongoDB StatefulSet, persistent storage, resource requests/limits, and a CPU-based Horizontal Pod Autoscaler (HPA).
 
-> **Credentials:** YAML files ending in `example` contain demo-only values. Do not put real credentials in GitHub. For a fresh deployment, keep the MongoDB root credentials in `mongodb-secret.example.yaml` consistent with the username/password you use when logging in. Keep the app user's password identical in the MongoDB user creation command and `flask-config.example.yaml`. The sample ConfigMap includes a demo-only connection URI to make this local assignment reproducible; for production, store the full MongoDB URI (including the application password) in a Kubernetes Secret instead of a ConfigMap. MongoDB initialization credentials are applied only when the data directory is first initialized; changing a Kubernetes Secret later does not automatically change an existing MongoDB user's password.
+> **Credentials:** The checked-in `*.example.yaml` files contain placeholders only. Keep real credentials in a local `mongodb-secret.yaml` Kubernetes Secret manifest, never in a ConfigMap or GitHub. The local Secret contains the MongoDB root credentials, application credentials, and the full `MONGODB_URI`; keep the URI username/password identical to `MONGO_APP_USERNAME` and `MONGO_APP_PASSWORD`. The `.gitignore` excludes local `mongodb-secret.yaml` and `flask-config.yaml` files. MongoDB initialization credentials are applied only when the data directory is first initialized; changing a Kubernetes Secret later does not automatically change an existing MongoDB user's password.
 
 ## Project structure
 
@@ -72,7 +72,7 @@ Copy-Item mongodb-secret.example.yaml mongodb-secret.yaml
 Copy-Item flask-config.example.yaml flask-config.yaml
 ```
 
-Edit **the local copies only** before applying them. In `mongodb-secret.yaml`, replace all four `REPLACE_WITH_...` values with your chosen root username/password and application username/password. In `flask-config.yaml`, set the `MONGODB_URI` username and password to the same application username/password, and keep the host, database, and `authSource=admin` unchanged. The app password must match in both files and in the MongoDB `db.createUser` command below. Never commit the local files or real credentials.
+Edit **the local copies only** before applying them. In `mongodb-secret.yaml`, replace all five placeholder values. Keep `MONGO_APP_USERNAME` and `MONGO_APP_PASSWORD` identical to the username/password embedded in `MONGODB_URI`. Keep the URI host, database, and `authSource=admin` unchanged. For a simple local setup, use an application password made of URL-safe letters and numbers; special characters in a MongoDB URI password must be percent-encoded. The app-user credentials must also match the MongoDB `db.createUser` command below. `flask-config.yaml` contains only the non-sensitive database name. Never commit the local files or real credentials.
 
 ```powershell
 kubectl apply -f namespace.yaml
@@ -86,7 +86,7 @@ kubectl get pv
 
 The StatefulSet's `volumeClaimTemplates` creates a 1 GiB PVC. On Minikube, the default StorageClass dynamically provisions the backing PersistentVolume (PV); verify both the claim is `Bound` and a PV exists with `kubectl get pvc -n faralpha` and `kubectl get pv`.
 
-Create the application user after the MongoDB pod is ready. The configured connection string authenticates the application user against MongoDB's `admin` database and accesses the `flask_db` database.
+Create the application user after the MongoDB pod is ready. The `MONGODB_URI` is read from the `mongodb-auth` Secret and authenticates the application user against MongoDB's `admin` database while accessing the `flask_db` database.
 
 ```powershell
 kubectl exec -it mongodb-0 -n faralpha -- mongosh -u YOUR_ROOT_USERNAME -p --authenticationDatabase admin
@@ -143,7 +143,7 @@ For a public Docker Hub image, Minikube can pull the image without a private-reg
 
 ## 4. Configure and deploy Flask
 
-Review your local `flask-config.yaml`: it must use the same application username/password created in MongoDB, database `flask_db`, and `authSource=admin`. Apply the ConfigMap and application resources:
+Review your local `flask-config.yaml`; it should contain `MONGO_DB: flask_db`. Confirm the local `mongodb-secret.yaml` has the matching application username/password in both its fields and `MONGODB_URI`. Apply the ConfigMap and application resources:
 
 ```powershell
 kubectl apply -f flask-config.yaml
@@ -277,21 +277,23 @@ Pods in namespace `faralpha` can reach Flask through `flask-service:5000`. Mongo
 
 Requests help Kubernetes schedule pods and form the baseline for CPU utilization calculations in HPA. Limits cap consumption; CPU over the limit can be throttled, and excessive memory can result in an OOM kill. This assignment sets requests to `200m` CPU / `250Mi` memory and limits to `500m` CPU / `500Mi` memory for the Flask and MongoDB containers.
 
-## Design choices
+## Design choices and alternatives considered
 
-- Flask runs under Gunicorn instead of Flask's development server.
-- The Deployment starts with two replicas; the HPA uses `autoscaling/v2`, 70% CPU target, minimum 2, and maximum 5.
-- MongoDB runs in a StatefulSet with a 1 GiB PVC so its data is stored outside the writable container layer.
-- MongoDB uses a headless Service and is not exposed outside the cluster.
-- Resource requests are set on Flask so HPA CPU utilization has a meaningful denominator.
-- A single MongoDB replica is appropriate for a local exercise, not production high availability. Production deployments would require stronger secret management, backups, TLS, network policies, and a replica-set architecture.
+- **MongoDB StatefulSet + headless Service:** chosen over a plain Deployment because MongoDB benefits from stable pod identity and a persistent volume association. A single replica keeps the local assignment manageable; it is not high availability. A production design should consider a MongoDB replica set or a managed database, plus backups and recovery testing.
+- **Dynamic PVC provisioning:** `volumeClaimTemplates` creates the PVC and Minikube's StorageClass provisions the PV. A manually pre-created static PV was not chosen because it adds local node/path coupling and is unnecessary for this Minikube task.
+- **NodePort Service + port-forward for local testing:** NodePort demonstrates an externally reachable Service, while `kubectl port-forward` provides a predictable host connection on Windows with the Minikube Docker driver. An Ingress or cloud LoadBalancer was not selected because this is a local cluster assignment and neither is required.
+- **CPU-based HPA (`autoscaling/v2`):** chosen because the assignment explicitly specifies CPU utilization above 70%. CPU requests are defined so Kubernetes can calculate utilization relative to requested CPU. A custom-metrics autoscaler was not selected because it is outside the requirement.
+- **Secret for database credentials; ConfigMap for non-sensitive settings:** the MongoDB URI is read from the Kubernetes Secret, while the database name alone is stored in the ConfigMap. A ConfigMap is not appropriate for passwords because its data is not intended to protect secrets.
+- **Gunicorn for Flask:** selected as a production-style WSGI server rather than Flask's development server. The container runs as a non-root user.
+
+This remains a learning/local environment, not a production deployment. Production hardening would also consider TLS, network policies, restricted RBAC, secret encryption/management, backup/restore validation, and multi-replica MongoDB architecture.
 
 ## Troubleshooting
 
 - **`ImagePullBackOff`:** verify `docker build -t faralpha-flask:1.0 .` succeeded and `minikube image load faralpha-flask:1.0` completed.
 - **HPA target `<unknown>`:** run `minikube addons enable metrics-server`, wait, and verify `kubectl top pods -n faralpha`.
 - **`Connection refused` from the load generator:** use the in-cluster Service port `flask-service:5000`. `30080` is the NodePort exposed from the host.
-- **MongoDB authentication/authorization errors:** verify the app password matches the password in `flask-config.example.yaml`, the user exists in MongoDB's `admin` database, and it has `readWrite` on `flask_db`. For an existing PVC, changing the Secret alone does not modify MongoDB's stored credentials.
+- **MongoDB authentication/authorization errors:** verify the application password matches `MONGODB_URI` in your local `mongodb-secret.yaml`, the user exists in MongoDB's `admin` database, and it has `readWrite` on `flask_db`. For an existing PVC, changing the Secret alone does not modify MongoDB's stored credentials.
 - **PVC pending:** inspect `kubectl get pvc -n faralpha` and `kubectl get storageclass`.
 - **Application failure:** inspect `kubectl logs deployment/flask-app -n faralpha` and `kubectl describe pod <pod-name> -n faralpha`.
 
