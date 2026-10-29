@@ -211,29 +211,30 @@ The maximum configured limit is 5 replicas; this test reached 4, not 5. HPA scal
 
 The following screenshots are from the actual test session:
 
+
 ### Flask Service and endpoints
 
-![Flask Service and endpoints](evidence/01-service-endpoints.png)
+![Flask Service and endpoints](01-service-endpoints.png)
 
 ### Welcome endpoint
 
-![Welcome endpoint returned timestamp](evidence/02-welcome-endpoint.png)
+![Welcome endpoint returned timestamp](02-welcome-endpoint.png)
 
 ### Successful POST data insert
 
-![POST /data returned Data inserted](evidence/03-post-data.png)
+![POST /data returned Data inserted](03-post-data.png)
 
 ### GET data verification
 
-![GET /data returned both inserted test documents](evidence/06-get-data.png)
+![GET /data returned both inserted test documents](06-get-data.png)
 
 ### HPA scale-up and scale-down observations
 
-![HPA output showing CPU increase and replica changes from 2 to 3 to 4 and back to 2](evidence/04-hpa-autoscaling.png)
+![HPA output showing CPU increase and replica changes from 2 to 3 to 4 and back to 2](04-hpa-autoscaling.png)
 
 ### Final pods and persistent volume claim
 
-![Final Kubernetes pods and PVC status](evidence/05-final-pods-pvc.png)
+![Final Kubernetes pods and PVC status](05-final-pods-pvc.png)
 
 ## Kubernetes DNS
 
