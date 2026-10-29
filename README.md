@@ -65,11 +65,18 @@ Wait until `kubectl top nodes` returns CPU/memory metrics before checking HPA be
 
 ## 2. Create the namespace, Secret, and MongoDB
 
-Before applying the example Secret, open `mongodb-secret.example.yaml`. Replace demo values locally if desired. Do not commit real credentials. For a fresh database, use the same root username/password when logging into MongoDB below.
+The checked-in `*.example.yaml` files intentionally contain placeholders/demo values. For a fresh deployment, create local copies so you do not need to put working credentials in the public repository:
+
+```powershell
+Copy-Item mongodb-secret.example.yaml mongodb-secret.yaml
+Copy-Item flask-config.example.yaml flask-config.yaml
+```
+
+Edit **the local copies only** before applying them. In `mongodb-secret.yaml`, replace all four `REPLACE_WITH_...` values with your chosen root username/password and application username/password. In `flask-config.yaml`, set the `MONGODB_URI` username and password to the same application username/password, and keep the host, database, and `authSource=admin` unchanged. The app password must match in both files and in the MongoDB `db.createUser` command below. Never commit the local files or real credentials.
 
 ```powershell
 kubectl apply -f namespace.yaml
-kubectl apply -f mongodb-secret.example.yaml
+kubectl apply -f mongodb-secret.yaml
 kubectl apply -f mongodb-service.yaml
 kubectl apply -f mongodb-statefulset.yaml
 kubectl rollout status statefulset/mongodb -n faralpha --timeout=180s
@@ -82,24 +89,24 @@ The StatefulSet's `volumeClaimTemplates` creates a 1 GiB PVC. On Minikube, the d
 Create the application user after the MongoDB pod is ready. The configured connection string authenticates the application user against MongoDB's `admin` database and accesses the `flask_db` database.
 
 ```powershell
-kubectl exec -it mongodb-0 -n faralpha -- mongosh -u adminuser -p --authenticationDatabase admin
+kubectl exec -it mongodb-0 -n faralpha -- mongosh -u YOUR_ROOT_USERNAME -p --authenticationDatabase admin
 ```
 
-At the password prompt, enter the `MONGO_ROOT_PASSWORD` from the Secret. At the `test>` prompt, run:
+Replace `YOUR_ROOT_USERNAME` with the root username you placed in your local Secret. At the password prompt, enter that Secret's `MONGO_ROOT_PASSWORD`. At the `test>` prompt, run the following, replacing the two app-user placeholders with the exact application username/password you configured in both local YAML files:
 
 ```javascript
 use admin
 db.createUser({
-  user: "flaskuser",
-  pwd: "change-this-app-password",
+  user: "YOUR_APP_USERNAME",
+  pwd: "YOUR_APP_PASSWORD",
   roles: [{ role: "readWrite", db: "flask_db" }]
 })
 ```
 
-Use the same application password in `flask-config.example.yaml`. If MongoDB reports that `flaskuser` already exists, do not create it again; instead grant the required role:
+If MongoDB reports that the application user already exists, do not create it again; instead grant the required role, replacing `YOUR_APP_USERNAME` with the configured username:
 
 ```javascript
-db.grantRolesToUser("flaskuser", [{ role: "readWrite", db: "flask_db" }])
+db.grantRolesToUser("YOUR_APP_USERNAME", [{ role: "readWrite", db: "flask_db" }])
 ```
 
 Then leave the shell with `exit`. Never delete the StatefulSet's PVC to solve a password mismatch; changing a Secret does not update users in an already-initialized database.
@@ -136,10 +143,10 @@ For a public Docker Hub image, Minikube can pull the image without a private-reg
 
 ## 4. Configure and deploy Flask
 
-Review `flask-config.example.yaml`: it should use `flaskuser`, the application password, database `flask_db`, and `authSource=admin`. Apply the ConfigMap and application resources:
+Review your local `flask-config.yaml`: it must use the same application username/password created in MongoDB, database `flask_db`, and `authSource=admin`. Apply the ConfigMap and application resources:
 
 ```powershell
-kubectl apply -f flask-config.example.yaml
+kubectl apply -f flask-config.yaml
 kubectl apply -f flask-deployment.yaml
 kubectl apply -f flask-service.yaml
 kubectl rollout status deployment/flask-app -n faralpha --timeout=180s
