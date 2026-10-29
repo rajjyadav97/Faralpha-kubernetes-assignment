@@ -28,8 +28,8 @@ spec:
                   key: MONGO_DB
             - name: MONGODB_URI
               valueFrom:
-                configMapKeyRef:
-                  name: flask-config
+                secretKeyRef:
+                  name: mongodb-auth
                   key: MONGODB_URI
           resources:
             requests:
@@ -50,3 +50,4 @@ spec:
               port: 5000
             initialDelaySeconds: 15
             periodSeconds: 20
+
