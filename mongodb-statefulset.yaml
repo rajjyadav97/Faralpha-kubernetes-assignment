@@ -43,8 +43,8 @@ spec:
             - name: mongo-data
               mountPath: /data/db
           readinessProbe:
-            exec:
-              command: ["mongosh", "--quiet", "-u", "$(MONGO_INITDB_ROOT_USERNAME)", "-p", "$(MONGO_INITDB_ROOT_PASSWORD)", "--authenticationDatabase", "admin", "--eval", "db.adminCommand('ping').ok"]
+            tcpSocket:
+              port: 27017
             initialDelaySeconds: 10
             periodSeconds: 10
             timeoutSeconds: 5

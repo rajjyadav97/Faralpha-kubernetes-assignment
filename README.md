@@ -1,31 +1,53 @@
-# FarAlpha SDE Intern Assignment — Flask, MongoDB and Kubernetes
+# FarAlpha SDE Intern Assignment — Flask, MongoDB, and Kubernetes
 
-This repository deploys a Python Flask API backed by an authenticated MongoDB StatefulSet on a local Minikube cluster. It includes a persistent MongoDB volume, Services, resource requests/limits and a CPU-based Horizontal Pod Autoscaler (HPA).
+A Python Flask API backed by MongoDB authentication, deployed on a local Minikube Kubernetes cluster. The project includes a two-replica Flask Deployment, internal MongoDB StatefulSet, persistent storage, resource requests/limits, and a CPU-based Horizontal Pod Autoscaler (HPA).
 
-> **Important:** Do not report autoscaling numbers or claim screenshots were captured until you run the tests below. Add your real command outputs and screenshots in the `evidence/` folder before submission. The YAML uses example passwords; replace them before applying and do not publish real secrets.
+> **Credentials:** YAML files ending in `example` contain demo-only values. Do not put real credentials in GitHub. For a fresh deployment, keep the MongoDB root credentials in `mongodb-secret.example.yaml` consistent with the username/password you use when logging in. Keep the app user's password identical in the MongoDB user creation command and `flask-config.example.yaml`. MongoDB initialization credentials are applied only when the data directory is first initialized; changing a Kubernetes Secret later does not automatically change an existing MongoDB user's password.
 
-## Architecture
+## Project structure
 
-- Flask Deployment: 2 initial replicas, can scale from 2 to 5.
-- Flask Service: NodePort `30080` for access from the host.
-- MongoDB StatefulSet: 1 pod with authentication enabled.
-- MongoDB headless Service: internal DNS and stable StatefulSet network identity; not exposed outside the cluster.
-- Persistent storage: StatefulSet `volumeClaimTemplates` requests a 1 GiB PVC mounted at `/data/db`. Minikube's default StorageClass normally provisions the PV automatically.
-- HPA: targets average CPU utilization of 70%.
-- Both application and database request `200m` CPU / `250Mi` memory and limit `500m` CPU / `500Mi` memory.
+All Kubernetes YAML files are in the repository root, matching the commands below.
+
+```text
+.
+├── app.py
+├── requirements.txt
+├── Dockerfile
+├── namespace.yaml
+├── mongodb-secret.example.yaml
+├── mongodb-service.yaml
+├── mongodb-statefulset.yaml
+├── flask-config.example.yaml
+├── flask-deployment.yaml
+├── flask-service.yaml
+├── flask-hpa.yaml
+├── README.md
+└── evidence/
+```
+
+## Architecture and requirements
+
+- **Flask Deployment:** 2 initial replicas; HPA permits 2–5 replicas.
+- **Flask Service:** NodePort `30080` to container/service port `5000`. On Windows with Minikube's Docker driver, `kubectl port-forward` is the most predictable local testing method.
+- **MongoDB:** authenticated StatefulSet with a headless, cluster-internal Service; it is not published via NodePort or LoadBalancer.
+- **Persistent data:** 1 GiB PVC mounted at MongoDB's `/data/db`.
+- **HPA:** `autoscaling/v2`, average CPU utilization target 70%, minimum 2 and maximum 5 replicas.
+- **Resources:** both Flask and MongoDB request `200m` CPU / `250Mi` memory and limit `500m` CPU / `500Mi` memory.
+- **Application routes:** `GET /` returns a welcome message and timestamp; `GET /data` reads documents; `POST /data` inserts a JSON object; `/health` is used for Flask readiness checks.
 
 ## Prerequisites
 
-Install Docker Desktop, kubectl and Minikube on Windows. Ensure Docker Desktop is running and WSL 2 setup is complete if Docker requests it.
+Install Docker Desktop, `kubectl`, and Minikube. Start Docker Desktop and make sure its engine is running. On Windows, complete WSL 2 setup if Docker Desktop requires it.
 
-Check:
 ```powershell
 docker --version
 kubectl version --client
 minikube version
 ```
 
-## 1. Start the cluster and metrics server
+## 1. Start Minikube and Metrics Server
+
+Run in PowerShell:
 
 ```powershell
 minikube start --driver=docker
@@ -34,195 +56,216 @@ kubectl get nodes
 kubectl top nodes
 ```
 
-Wait for `kubectl top nodes` to return metrics before testing HPA.
+Wait until `kubectl top nodes` returns CPU/memory metrics before checking HPA behavior.
 
-## 2. Set demo credentials and create Kubernetes resources
+## 2. Create the namespace, Secret, and MongoDB
 
-Edit `k8s/mongodb-secret.example.yaml` and replace both example passwords. This is a learning assignment: for a real repository, create the Secret locally and avoid committing real credentials.
-
-```powershell
-kubectl apply -f k8s/namespace.yaml
-kubectl apply -f k8s/mongodb-secret.example.yaml
-```
-
-The MongoDB application user must exist in MongoDB. The official Mongo image creates only the root user from `MONGO_INITDB_ROOT_USERNAME` / `MONGO_INITDB_ROOT_PASSWORD`. After MongoDB starts, create the least-privilege app user once:
+Before applying the example Secret, open `mongodb-secret.example.yaml`. Replace demo values locally if desired. Do not commit real credentials. For a fresh database, use the same root username/password when logging into MongoDB below.
 
 ```powershell
-kubectl apply -f k8s/mongodb-service.yaml
-kubectl apply -f k8s/mongodb-statefulset.yaml
-kubectl -n faralpha rollout status statefulset/mongodb --timeout=180s
-kubectl -n faralpha exec -it mongodb-0 -- mongosh -u adminuser -p --authenticationDatabase admin
+kubectl apply -f namespace.yaml
+kubectl apply -f mongodb-secret.example.yaml
+kubectl apply -f mongodb-service.yaml
+kubectl apply -f mongodb-statefulset.yaml
+kubectl rollout status statefulset/mongodb -n faralpha --timeout=180s
+kubectl get pods,pvc -n faralpha
 ```
 
-Enter the root password at the prompt, then run the following in the Mongo shell, substituting the same app password as in `k8s/flask-config.example.yaml`:
+Create the application user after the MongoDB pod is ready. The configured connection string authenticates the application user against MongoDB's `admin` database and accesses the `flask_db` database.
+
+```powershell
+kubectl exec -it mongodb-0 -n faralpha -- mongosh -u adminuser -p --authenticationDatabase admin
+```
+
+At the password prompt, enter the `MONGO_ROOT_PASSWORD` from the Secret. At the `test>` prompt, run:
 
 ```javascript
-use flask_db
+use admin
 db.createUser({
   user: "flaskuser",
   pwd: "change-this-app-password",
   roles: [{ role: "readWrite", db: "flask_db" }]
 })
-exit
 ```
 
-For the shell command above, use the actual root username you placed in the Secret. If you use different credential values, keep the URI and created user in sync.
+Use the same application password in `flask-config.example.yaml`. If MongoDB reports that `flaskuser` already exists, do not create it again; instead grant the required role:
 
-## 3. Build the Flask image
+```javascript
+db.grantRolesToUser("flaskuser", [{ role: "readWrite", db: "flask_db" }])
+```
 
-From the repository root, with Docker Desktop running:
+Then leave the shell with `exit`. Never delete the StatefulSet's PVC to solve a password mismatch; changing a Secret does not update users in an already-initialized database.
+
+## 3. Build the Flask container image
+
+Run these commands from the repository root with Docker Desktop running:
 
 ```powershell
-minikube image build -t faralpha-flask:1.0 .
+docker build -t faralpha-flask:1.0 .
+minikube image load faralpha-flask:1.0
 ```
 
-Alternative registry workflow: `docker build -t YOUR_DOCKERHUB_USERNAME/faralpha-flask:1.0 .`, then `docker login`, `docker push YOUR_DOCKERHUB_USERNAME/faralpha-flask:1.0`, and change `image` in `k8s/flask-deployment.yaml` to that pushed image name. Never put registry passwords in source files.
+The Deployment references `faralpha-flask:1.0` with `imagePullPolicy: IfNotPresent`, so the image must be loaded into the Minikube node. An alternative is to push a tagged image to a container registry and update `image` in `flask-deployment.yaml`; never put registry passwords in source files.
 
 ## 4. Configure and deploy Flask
 
-Edit `k8s/flask-config.example.yaml` to use the same app password created in MongoDB. Then apply the resources:
+Review `flask-config.example.yaml`: it should use `flaskuser`, the application password, database `flask_db`, and `authSource=admin`. Apply the ConfigMap and application resources:
 
 ```powershell
-kubectl apply -f k8s/flask-config.example.yaml
-kubectl apply -f k8s/flask-deployment.yaml
-kubectl apply -f k8s/flask-service.yaml
-kubectl -n faralpha rollout status deployment/flask-app --timeout=180s
-kubectl -n faralpha get pods,svc,pvc
+kubectl apply -f flask-config.example.yaml
+kubectl apply -f flask-deployment.yaml
+kubectl apply -f flask-service.yaml
+kubectl rollout status deployment/flask-app -n faralpha --timeout=180s
+kubectl get pods,svc,pvc -n faralpha
 ```
 
-## 5. Test endpoints
+## 5. Test the HTTP endpoints and MongoDB operations
 
-In one terminal:
-```powershell
-kubectl -n faralpha port-forward service/flask-service 5000:5000
-```
-
-In a second PowerShell terminal:
-```powershell
-Invoke-RestMethod http://localhost:5000/
-Invoke-RestMethod -Method Post -Uri http://localhost:5000/data -ContentType "application/json" -Body '{"sampleKey":"sampleValue","source":"assignment-test"}'
-Invoke-RestMethod http://localhost:5000/data
-```
-
-Expected: `/` returns a welcome message with a timestamp; POST `/data` returns `status: Data inserted`; GET `/data` returns inserted documents.
-
-## 6. Configure HPA and test autoscaling
+In **PowerShell terminal 1**, start port-forwarding. Port `5001` on the host is used to avoid a possible local conflict on port `5000`:
 
 ```powershell
-kubectl apply -f k8s/flask-hpa.yaml
-kubectl -n faralpha get hpa
-kubectl -n faralpha top pods
+kubectl port-forward service/flask-service 5001:5000 -n faralpha
 ```
 
-The HPA requires the Metrics Server and CPU requests on the target containers. It aims for average CPU use of 70% of requested CPU, with replicas bounded between 2 and 5.
+Keep that terminal open. In **PowerShell terminal 2**:
 
-Generate traffic from a temporary pod (leave this running in a separate terminal during observation):
 ```powershell
-kubectl -n faralpha run load-generator --image=busybox:1.36 --restart=Never -- sh -c "while true; do wget -q -O- http://flask-service:5000/ >/dev/null; done"
+Invoke-RestMethod http://127.0.0.1:5001/
+
+$body = @{
+    name = "Raj"
+    message = "Kubernetes test"
+    source = "PowerShell"
+} | ConvertTo-Json
+
+Invoke-RestMethod -Uri "http://127.0.0.1:5001/data" -Method Post -ContentType "application/json" -Body $body
+Invoke-RestMethod http://127.0.0.1:5001/data
 ```
 
-Watch HPA and pods in another terminal:
+Expected observations: `/` returns the welcome text with a timestamp; successful POST returns `status: Data inserted`; GET returns the stored documents. The successful POST response and a follow-up GET showing the inserted documents were both captured in the evidence screenshots.
+
+## 6. Configure and test HPA autoscaling
+
+Apply HPA and check metrics:
+
 ```powershell
-kubectl -n faralpha get hpa -w
-kubectl -n faralpha get deployment flask-app
-kubectl -n faralpha get pods
+kubectl apply -f flask-hpa.yaml
+kubectl get hpa -n faralpha
+kubectl top pods -n faralpha
+kubectl describe hpa flask-hpa -n faralpha
 ```
 
-A request loop may not create enough CPU load to trigger scale-out on every computer. If replicas do not increase, inspect `kubectl -n faralpha describe hpa flask-hpa`, `kubectl -n faralpha top pods`, and increase load or use a CPU stress test. HPA scaling takes time and is not instantaneous. Do not invent a scale-out result if the observed CPU never crosses the target.
+Make a temporary BusyBox pod that can send traffic. If a previous pod with this name exists, remove it first:
 
-Stop and remove the load generator:
 ```powershell
-kubectl -n faralpha delete pod load-generator
+kubectl delete pod load-generator -n faralpha --ignore-not-found
+kubectl run load-generator -n faralpha --image=busybox:1.36 --restart=Never --command -- sleep 3600
+kubectl wait --for=condition=Ready pod/load-generator -n faralpha --timeout=120s
 ```
 
-### Autoscaling results (fill with actual results)
+In a **separate terminal**, watch HPA metrics:
 
-Record the values observed on your machine after testing:
+```powershell
+kubectl get hpa flask-hpa -n faralpha --watch
+```
 
-| Observation | Actual result |
+In another terminal, start parallel request loops. The Kubernetes Service port is **5000** (not the NodePort `30080` and not port `3000`):
+
+```powershell
+kubectl exec -it load-generator -n faralpha -- sh -c "for i in 1 2 3 4 5 6 7 8; do (while true; do wget -q -O- http://flask-service:5000/ >/dev/null 2>&1; done) & done; wait"
+```
+
+Watch the HPA output and wait for CPU metrics and replica count changes. In another terminal, you can run:
+
+```powershell
+kubectl get pods -n faralpha
+kubectl top pods -n faralpha
+kubectl get deployment flask-app -n faralpha
+```
+
+To stop the active test, press `Ctrl+C` in the terminal running the load command, then remove the temporary pod:
+
+```powershell
+kubectl delete pod load-generator -n faralpha
+```
+
+### Actual observed autoscaling results
+
+These values are based on the HPA watch output captured from the completed test in this environment; they are not estimated placeholders.
+
+| Observation | Result |
 |---|---|
-| Initial Flask replicas | TODO |
-| HPA target | 70% CPU |
+| Initial replicas | 2 |
+| CPU utilization target | 70% |
 | Minimum / maximum replicas | 2 / 5 |
-| CPU under load | TODO (from `kubectl top pods`) |
-| Replicas reached during load | TODO |
-| Time to scale out | TODO |
-| Replicas after load stopped | TODO |
-| Issues encountered | TODO |
+| CPU samples during load | 93%, 100%, 80% |
+| Highest replica count observed | 4 |
+| After load stopped | CPU fell to 15%, then 1%; replicas eventually returned to 2 |
+| Temporary load-generator pod | Deleted after the test |
+| POST `/data` | Confirmed: returned `Data inserted` |
+| GET `/data` after POST | Confirmed: GET returned both inserted test documents |
 
-### Required screenshots
+The maximum configured limit is 5 replicas; this test reached 4, not 5. HPA scale-down is delayed by its stabilization behavior, so replicas may remain above 2 for a while after the load is stopped.
 
-Create an `evidence/` directory and save genuine screenshots from your machine. Recommended:
-1. `01-pods-services-pvc.png` — `kubectl -n faralpha get pods,svc,pvc`
-2. `02-endpoints.png` — successful POST and GET requests
-3. `03-hpa-under-load.png` — `kubectl -n faralpha get hpa` while load is running
-4. `04-replicas-scaled.png` — `kubectl -n faralpha get deployment flask-app` showing the observed replica count
-5. `05-pods-cpu.png` — `kubectl -n faralpha top pods`
+## Evidence screenshots
 
-Do not submit placeholder screenshots as test evidence.
+The following screenshots are from the actual test session:
 
-## DNS resolution in Kubernetes
+### Flask Service and endpoints
 
-Kubernetes creates DNS records for Services. Pods in the `faralpha` namespace can reach the Flask Service using `flask-service` and MongoDB using the stable StatefulSet DNS name `mongodb-0.mongodb.faralpha.svc.cluster.local`. The `mongodb` headless Service and StatefulSet identity provide stable pod DNS. The MongoDB Service is cluster-internal; it is not exposed via NodePort or LoadBalancer. The Flask `MONGODB_URI` uses the internal DNS name and `authSource=admin` because the initial root account is created in MongoDB's `admin` database.
+![Flask Service and endpoints](evidence/01-service-endpoints.png)
+
+### Welcome endpoint
+
+![Welcome endpoint returned timestamp](evidence/02-welcome-endpoint.png)
+
+### Successful POST data insert
+
+![POST /data returned Data inserted](evidence/03-post-data.png)
+
+### GET data verification
+
+![GET /data returned both inserted test documents](evidence/06-get-data.png)
+
+### HPA scale-up and scale-down observations
+
+![HPA output showing CPU increase and replica changes from 2 to 3 to 4 and back to 2](evidence/04-hpa-autoscaling.png)
+
+### Final pods and persistent volume claim
+
+![Final Kubernetes pods and PVC status](evidence/05-final-pods-pvc.png)
+
+## Kubernetes DNS
+
+Pods in namespace `faralpha` can reach Flask through `flask-service:5000`. MongoDB is internal-only and reachable at the StatefulSet DNS name `mongodb-0.mongodb.faralpha.svc.cluster.local:27017`. The headless Service named `mongodb` provides stable DNS for the StatefulSet pod. The MongoDB connection string includes `authSource=admin` because the application user is created in the `admin` authentication database, while its `readWrite` role is scoped to `flask_db`.
 
 ## Resource requests and limits
 
-- **Requests** are used by the Kubernetes scheduler to place pods and by CPU-based HPA utilization calculations as the baseline.
-- **Limits** cap resource consumption. CPU over the limit is throttled; memory over the limit can lead to an out-of-memory kill.
-- This assignment uses `requests: cpu=200m, memory=250Mi` and `limits: cpu=500m, memory=500Mi` for both Flask and MongoDB as the requested sample values. These are demonstration values and should be tuned for production workloads.
+Requests help Kubernetes schedule pods and form the baseline for CPU utilization calculations in HPA. Limits cap consumption; CPU over the limit can be throttled, and excessive memory can result in an OOM kill. This assignment sets requests to `200m` CPU / `250Mi` memory and limits to `500m` CPU / `500Mi` memory for the Flask and MongoDB containers.
 
 ## Design choices
 
-- Flask runs under Gunicorn instead of Flask's development server, which is not intended for production use.
-- MongoDB uses a StatefulSet and persistent volume claim so its pod identity and data volume survive pod replacement.
-- MongoDB is internal-only through a headless Service; Flask is exposed with NodePort for local access. Port-forwarding is also provided as a convenient local test method.
-- MongoDB authentication uses Kubernetes Secret references for root credentials. The example file is for local practice only; production systems should use a secret manager and stronger operational controls.
-- HPA uses `autoscaling/v2`, CPU utilization target 70%, minimum 2 and maximum 5 replicas. Metrics Server is required.
-- A single MongoDB replica is suitable for this local assignment, not high availability. Production would need a carefully designed replica set, backups, TLS, network policies and secret rotation.
+- Flask runs under Gunicorn instead of Flask's development server.
+- The Deployment starts with two replicas; the HPA uses `autoscaling/v2`, 70% CPU target, minimum 2, and maximum 5.
+- MongoDB runs in a StatefulSet with a 1 GiB PVC so its data is stored outside the writable container layer.
+- MongoDB uses a headless Service and is not exposed outside the cluster.
+- Resource requests are set on Flask so HPA CPU utilization has a meaningful denominator.
+- A single MongoDB replica is appropriate for a local exercise, not production high availability. Production deployments would require stronger secret management, backups, TLS, network policies, and a replica-set architecture.
 
 ## Troubleshooting
 
-- `ImagePullBackOff`: confirm `minikube image build -t faralpha-flask:1.0 .` succeeded and image name matches.
-- HPA shows `<unknown>`: enable Metrics Server and wait; check `kubectl top pods`.
-- MongoDB auth failure: ensure app username/password match the user created in MongoDB and the URI has `authSource=admin`.
-- PVC pending: check `kubectl -n faralpha get pvc` and `kubectl get storageclass`.
-- App readiness failing: inspect `kubectl -n faralpha logs deployment/flask-app` and `kubectl -n faralpha describe pod <pod-name>`.
+- **`ImagePullBackOff`:** verify `docker build -t faralpha-flask:1.0 .` succeeded and `minikube image load faralpha-flask:1.0` completed.
+- **HPA target `<unknown>`:** run `minikube addons enable metrics-server`, wait, and verify `kubectl top pods -n faralpha`.
+- **`Connection refused` from the load generator:** use the in-cluster Service port `flask-service:5000`. `30080` is the NodePort exposed from the host.
+- **MongoDB authentication/authorization errors:** verify the app password matches the password in `flask-config.example.yaml`, the user exists in MongoDB's `admin` database, and it has `readWrite` on `flask_db`. For an existing PVC, changing the Secret alone does not modify MongoDB's stored credentials.
+- **PVC pending:** inspect `kubectl get pvc -n faralpha` and `kubectl get storageclass`.
+- **Application failure:** inspect `kubectl logs deployment/flask-app -n faralpha` and `kubectl describe pod <pod-name> -n faralpha`.
 
 ## Cleanup
+
+Only use this if you want to remove the assignment resources after evaluation. Deleting the namespace also deletes its PVC and stored MongoDB data.
 
 ```powershell
 kubectl delete namespace faralpha
 minikube stop
 ```
-
-## Autoscaling Test Results
-
-### Configuration
-- Minimum replicas: 2
-- Maximum replicas: 5
-- CPU utilization target: 70%
-- Metrics Server: Enabled
-
-### Test Procedure
-A temporary load-generator pod sent repeated HTTP GET requests to the Flask service to generate traffic. HPA metrics and replica counts were monitored using kubectl.
-
-### Observed Results
-During the load test, CPU utilization reached 93%, 100%, and 80%. The HPA increased the Flask deployment from 2 replicas to 3 and then 4 replicas. After the load was stopped, CPU utilization decreased to 15% and later to 1%.
-
-The load-generator pod was deleted after testing.
-
-### Application and Storage Verification
-- Flask welcome endpoint returned the current timestamp.
-- POST request to `/data` returned `Data inserted`.
-- Flask pods and MongoDB pod were Running.
-- MongoDB persistent volume claim was Bound with 1 GiB capacity.
-
-### Evidence
-Add the actual screenshots below:
-- HPA watch output showing CPU utilization and replica scaling.
-- Final `kubectl get pods -n faralpha` output.
-- Final `kubectl get pvc -n faralpha` output.
-<img width="1600" height="900" alt="hpa-autoscaling2" src="https://github.com/user-attachments/assets/a64aab6c-e87a-4914-b91d-f2771ef61fdd" />
-<img width="1600" height="900" alt="hpa-autoscaling2" src="https://github.com/user-attachments/assets/4c2f0ddb-b840-42b3-9f1c-c6fb7d055a10" />
-<img width="1600" height="900" alt="hpa-autoscaling png" src="https://github.com/user-attachments/assets/3de324ee-d655-412c-aa90-e28f565b92d4" />
-
