@@ -1,4 +1,4 @@
-# Demo values. For real deployments, keep credentials in a Secret, not ConfigMap.
+# Non-sensitive application settings only. Keep credentials in mongodb-auth Secret.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -6,4 +6,3 @@ metadata:
   namespace: faralpha
 data:
   MONGO_DB: flask_db
-  MONGODB_URI: "mongodb://flaskuser:change-this-app-password@mongodb-0.mongodb.faralpha.svc.cluster.local:27017/flask_db?authSource=admin"
