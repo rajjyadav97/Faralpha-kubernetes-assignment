@@ -2,3 +2,6 @@ venv/
 __pycache__/
 .env
 *.pyc
+# Local deployment manifests may contain real credentials.
+mongodb-secret.yaml
+flask-config.yaml
