@@ -194,3 +194,35 @@ Kubernetes creates DNS records for Services. Pods in the `faralpha` namespace ca
 kubectl delete namespace faralpha
 minikube stop
 ```
+
+## Autoscaling Test Results
+
+### Configuration
+- Minimum replicas: 2
+- Maximum replicas: 5
+- CPU utilization target: 70%
+- Metrics Server: Enabled
+
+### Test Procedure
+A temporary load-generator pod sent repeated HTTP GET requests to the Flask service to generate traffic. HPA metrics and replica counts were monitored using kubectl.
+
+### Observed Results
+During the load test, CPU utilization reached 93%, 100%, and 80%. The HPA increased the Flask deployment from 2 replicas to 3 and then 4 replicas. After the load was stopped, CPU utilization decreased to 15% and later to 1%.
+
+The load-generator pod was deleted after testing.
+
+### Application and Storage Verification
+- Flask welcome endpoint returned the current timestamp.
+- POST request to `/data` returned `Data inserted`.
+- Flask pods and MongoDB pod were Running.
+- MongoDB persistent volume claim was Bound with 1 GiB capacity.
+
+### Evidence
+Add the actual screenshots below:
+- HPA watch output showing CPU utilization and replica scaling.
+- Final `kubectl get pods -n faralpha` output.
+- Final `kubectl get pvc -n faralpha` output.
+<img width="1600" height="900" alt="hpa-autoscaling2" src="https://github.com/user-attachments/assets/a64aab6c-e87a-4914-b91d-f2771ef61fdd" />
+<img width="1600" height="900" alt="hpa-autoscaling2" src="https://github.com/user-attachments/assets/4c2f0ddb-b840-42b3-9f1c-c6fb7d055a10" />
+<img width="1600" height="900" alt="hpa-autoscaling png" src="https://github.com/user-attachments/assets/3de324ee-d655-412c-aa90-e28f565b92d4" />
+
