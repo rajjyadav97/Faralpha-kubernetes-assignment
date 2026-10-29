@@ -2,7 +2,7 @@
 
 A Python Flask API backed by MongoDB authentication, deployed on a local Minikube Kubernetes cluster. The project includes a two-replica Flask Deployment, internal MongoDB StatefulSet, persistent storage, resource requests/limits, and a CPU-based Horizontal Pod Autoscaler (HPA).
 
-> **Credentials:** YAML files ending in `example` contain demo-only values. Do not put real credentials in GitHub. For a fresh deployment, keep the MongoDB root credentials in `mongodb-secret.example.yaml` consistent with the username/password you use when logging in. Keep the app user's password identical in the MongoDB user creation command and `flask-config.example.yaml`. MongoDB initialization credentials are applied only when the data directory is first initialized; changing a Kubernetes Secret later does not automatically change an existing MongoDB user's password.
+> **Credentials:** YAML files ending in `example` contain demo-only values. Do not put real credentials in GitHub. For a fresh deployment, keep the MongoDB root credentials in `mongodb-secret.example.yaml` consistent with the username/password you use when logging in. Keep the app user's password identical in the MongoDB user creation command and `flask-config.example.yaml`. The sample ConfigMap includes a demo-only connection URI to make this local assignment reproducible; for production, store the full MongoDB URI (including the application password) in a Kubernetes Secret instead of a ConfigMap. MongoDB initialization credentials are applied only when the data directory is first initialized; changing a Kubernetes Secret later does not automatically change an existing MongoDB user's password.
 
 ## Project structure
 
@@ -21,8 +21,13 @@ All Kubernetes YAML files are in the repository root, matching the commands belo
 ├── flask-deployment.yaml
 ├── flask-service.yaml
 ├── flask-hpa.yaml
-├── README.md
-└── evidence/
+├── 01-service-endpoints.png
+├── 02-welcome-endpoint.png
+├── 03-post-data.png
+├── 04-hpa-autoscaling.png
+├── 05-final-pods-pvc.png
+├── 06-get-data.png
+└── README.md
 ```
 
 ## Architecture and requirements
@@ -69,7 +74,10 @@ kubectl apply -f mongodb-service.yaml
 kubectl apply -f mongodb-statefulset.yaml
 kubectl rollout status statefulset/mongodb -n faralpha --timeout=180s
 kubectl get pods,pvc -n faralpha
+kubectl get pv
 ```
+
+The StatefulSet's `volumeClaimTemplates` creates a 1 GiB PVC. On Minikube, the default StorageClass dynamically provisions the backing PersistentVolume (PV); verify both the claim is `Bound` and a PV exists with `kubectl get pvc -n faralpha` and `kubectl get pv`.
 
 Create the application user after the MongoDB pod is ready. The configured connection string authenticates the application user against MongoDB's `admin` database and accesses the `flask_db` database.
 
@@ -98,14 +106,33 @@ Then leave the shell with `exit`. Never delete the StatefulSet's PVC to solve a 
 
 ## 3. Build the Flask container image
 
-Run these commands from the repository root with Docker Desktop running:
+Run these commands from the repository root with Docker Desktop running. This is the tested local Minikube workflow:
 
 ```powershell
 docker build -t faralpha-flask:1.0 .
 minikube image load faralpha-flask:1.0
 ```
 
-The Deployment references `faralpha-flask:1.0` with `imagePullPolicy: IfNotPresent`, so the image must be loaded into the Minikube node. An alternative is to push a tagged image to a container registry and update `image` in `flask-deployment.yaml`; never put registry passwords in source files.
+The Deployment uses `image: faralpha-flask:1.0` with `imagePullPolicy: IfNotPresent`, so the image must be available inside Minikube for this workflow.
+
+### Optional: build and push to Docker Hub
+
+The assignment also asks for instructions to publish the image to a container registry. Replace `YOUR_DOCKERHUB_USERNAME` with your actual Docker Hub username. This path is optional for the local Minikube test above.
+
+```powershell
+docker login
+docker tag faralpha-flask:1.0 YOUR_DOCKERHUB_USERNAME/faralpha-flask:1.0
+docker push YOUR_DOCKERHUB_USERNAME/faralpha-flask:1.0
+```
+
+After pushing, change the `image` field in `flask-deployment.yaml` to `YOUR_DOCKERHUB_USERNAME/faralpha-flask:1.0`, then apply the updated Deployment:
+
+```powershell
+kubectl apply -f flask-deployment.yaml
+kubectl rollout status deployment/flask-app -n faralpha --timeout=180s
+```
+
+For a public Docker Hub image, Minikube can pull the image without a private-registry Secret. Do not commit registry credentials, access tokens, or real database passwords to GitHub.
 
 ## 4. Configure and deploy Flask
 
@@ -210,7 +237,6 @@ The maximum configured limit is 5 replicas; this test reached 4, not 5. HPA scal
 ## Evidence screenshots
 
 The following screenshots are from the actual test session:
-
 
 ### Flask Service and endpoints
 
